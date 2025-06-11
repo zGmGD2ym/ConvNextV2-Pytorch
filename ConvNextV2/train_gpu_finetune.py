@@ -17,6 +17,13 @@ from util.utils import TensorboardLogger, str2bool, remap_checkpoint_keys, load_
 from models import *
 from optim_factory import create_optimizer, LayerDecayValueAssigner
 from estimate_model import Predictor, Plot_ROC, predict_single_image
+from sklearn.metrics import confusion_matrix
+from util.metrics import (
+    plot_confusion_matrix,
+    plot_roc_curve_multiclass,
+    plot_pr_curve_multiclass,
+    calculate_specificity,
+)
 
 
 def get_args_parser():
@@ -443,6 +450,45 @@ def main(args):
     predict_single_image(model_without_ddp, device)
     Predictor(model_without_ddp, data_loader_val, args.resume, device)
     Plot_ROC(model_without_ddp, data_loader_val, args.resume, device)
+
+    # additional metrics using util.metrics
+    all_labels = []
+    all_probs = []
+    model_without_ddp.eval()
+    with torch.no_grad():
+        for images, labels in data_loader_val:
+            images = images.to(device)
+            outputs = model_without_ddp(images)
+            probs = torch.softmax(outputs, dim=1)
+            all_probs.append(probs.cpu().numpy())
+            all_labels.append(labels.numpy())
+
+    all_probs = np.concatenate(all_probs, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+
+    cm = confusion_matrix(all_labels, np.argmax(all_probs, axis=1))
+
+    if os.path.exists('./classes_indices.json'):
+        with open('./classes_indices.json', 'r') as f:
+            class_dict = json.load(f)
+        class_names = [class_dict[str(i)] for i in range(len(class_dict))]
+    else:
+        class_names = [str(i) for i in range(cm.shape[0])]
+
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+    fig_cm = plot_confusion_matrix(cm, class_names)
+    fig_cm.savefig(os.path.join(args.output_dir, 'confusion_matrix.png'))
+
+    labels_one_hot = np.eye(len(class_names))[all_labels]
+    fig_roc = plot_roc_curve_multiclass(labels_one_hot, all_probs, class_names)
+    fig_roc.savefig(os.path.join(args.output_dir, 'roc_curve.png'))
+
+    fig_pr = plot_pr_curve_multiclass(labels_one_hot, all_probs, class_names)
+    fig_pr.savefig(os.path.join(args.output_dir, 'pr_curve.png'))
+
+    specificity = calculate_specificity(cm)
+    print(f'Specificity: {specificity:.4f}')
 
 
 if __name__ == '__main__':
